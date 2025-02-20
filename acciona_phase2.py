@@ -6,65 +6,36 @@ import streamlit as st
 
 # set page
 st.set_page_config(
-    page_title="Acciona Phase II",
+    page_title="Acciona Challenge",
     page_icon="",
     layout="wide")
 
-#######################
-# CSS styling
-st.markdown("""
-<style>
-
-[data-testid="block-container"] {
-    padding-left: 2rem;
-    padding-right: 2rem;
-    padding-top: 1rem;
-    padding-bottom: 0rem;
-    margin-bottom: -7rem;
-}
-
-[data-testid="stVerticalBlock"] {
-    padding-left: 0rem;
-    padding-right: 0rem;
-}
-
-[data-testid="stMetric"] {
-    background-color: #393939;
-    text-align: center;
-    padding: 15px 0;
-}
-
-[data-testid="stMetricLabel"] {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
-[data-testid="stMetricDeltaIcon-Up"] {
-    position: relative;
-    left: 38%;
-    -webkit-transform: translateX(-50%);
-    -ms-transform: translateX(-50%);
-    transform: translateX(-50%);
-}
-
-[data-testid="stMetricDeltaIcon-Down"] {
-    position: relative;
-    left: 38%;
-    -webkit-transform: translateX(-50%);
-    -ms-transform: translateX(-50%);
-    transform: translateX(-50%);
-}
-
-</style>
-""", unsafe_allow_html=True)
-
 # load data
-df = pd.read_csv("data/all_phase2.csv")
-pvlocs = pd.read_csv("data/photovoltaic_locations.csv")
-wlocs = pd.read_csv("data/wind_turbines_locations.csv")
-df = df.merge(pd.concat([pvlocs,wlocs]),on="sitename")
-df['year'] = df.time.apply(lambda x: x[0:4])
+@st.cache_data
+def load_data(filename):
+    # 
+    dfp = pd.read_csv(filename)
+    if "time" in dfp.columns:
+        dfp['year'] = dfp.time.apply(lambda x: x[0:4])
+        dfp = dfp.drop(columns=["time"])
+    # remove monthly data by averaging --- THIS IS NOW DONE IN PREPARATION
+    # dfp = dfp.groupby(['vartype', 'scenario',
+    # 'asset_type', 'varname', 'sitename',"year"]).mean().reset_index()
+    # geoloc
+    pvlocs = pd.read_csv("data/photovoltaic_locations.csv")
+    wlocs = pd.read_csv("data/wind_turbines_locations.csv")
+    dfp = dfp.merge(pd.concat([pvlocs,wlocs]),on="sitename")
+    return dfp
+
+@st.cache_data
+def get_locations(df):
+    sites = df.groupby('sitename').first().reset_index()
+    return sites[['sitename', 'lat','lon','asset_type']]
+
+dfp1 = load_data("data/all_phase1_annual.csv")
+dfp2 = load_data("data/all_phase2.csv")
+
+sitesdf = get_locations(dfp2)
 
 # chart colors
 scenarios= ['ssp126', 'ssp245', 'ssp585']
@@ -94,7 +65,7 @@ colors = {
     },    
 }
 
-def make_small_multiples(asset):
+def make_small_multiples(df, asset):
     # small multiples
     dfasset = df[(df.asset_type==asset)]
     varnames = dfasset.varname.unique()
@@ -127,7 +98,7 @@ def make_small_multiples(asset):
                     row=row+1, col=col+1)  
                 ymin = min(ymin, dfa[(dfa.scenario==scenario)]['value'].min() )
                 ymax = max(ymax, dfa[(dfa.scenario==scenario)]['value'].max() )
-        domains.append( [ymin,ymax])
+        domains.append([ymin,ymax])
         
     # add the row labels
     for row,var in enumerate(varnames):  
@@ -147,8 +118,8 @@ def make_small_multiples(asset):
                         text=bvar, font=dict(size=10),align="left",
                         row=row+1, col=len(sites)+1)   
 
-    fig.update_layout(template='plotly_white')
-
+    fig.update_layout(template='plotly_white',
+                      height=80*len(varnames))
     fig.update_xaxes(showticklabels=False)
     fig.update_xaxes(showline=True, linewidth=0.1, linecolor='rgb(200,200,200)', mirror=True)
     fig.update_yaxes(showline=True, linewidth=0.1, linecolor='rgb(200,200,200)', mirror=True)
@@ -157,16 +128,15 @@ def make_small_multiples(asset):
     return fig
 
 
-def make_site_plots(sel_site):
+def make_site_plots(df, sel_site, phase):
     # map selector and individual charts
     dfsite = df[(df.sitename==sel_site)]
-    asset_type = df[(df.sitename==sel_site)].asset_type.unique()[0]
+    asset_type = dfsite.asset_type.unique()[0]
     varnames = dfsite.varname.unique()
 
-    if asset_type=="PV":
-        ROWS = 4
-    else:
-        ROWS = 3
+    ROWS = len(varnames)//2
+    if (2*(len(varnames)/2)!=2*(len(varnames)//2)):
+        ROWS += 1 
 
     fig = make_subplots(
         shared_xaxes=False, shared_yaxes=False,
@@ -232,8 +202,7 @@ def make_site_plots(sel_site):
     return fig
 
 
-def make_map():
-    sdf = df[['lat','lon','asset_type','sitename']]
+def make_map(sdf):
     fig = go.Figure()
     fig.add_trace(go.Scattergeo(lon=sdf['lon'],lat=sdf['lat'],
                         marker_color=sdf["asset_type"].apply(lambda x: colors[x]['ssp245']),
@@ -247,37 +216,48 @@ def make_map():
     fig.update_layout(dragmode=False)
     return fig
 
+def make_page(dfx, phase):
+    global sel_site
+    # Layout    
+    left_column, right_column = st.columns(2)
+
+    with left_column:
+        event = st.plotly_chart(make_map(sitesdf), key="map"+phase, 
+                        on_select="rerun", selection_mode=["points"])
+        points = event["selection"].get("points", [])
+        if points:
+            first_point = points[0]
+            sel_site = first_point.get("text", None)
+        else:
+            sel_site = None
+        st.empty()
+        #sel_site = st.selectbox("Select site",df.sitename.unique())
+        if sel_site is not None:
+            title_col, close_col = st.columns([0.9, 0.1])
+            if close_col.button("",icon=":material/close:", key="B"+phase):
+                sel_site = None
+            else:
+                if phase=="phase2":
+                    title_col.markdown(f"### Power and damage predictions for {sel_site.replace('_',' ')}")
+                else:
+                    title_col.markdown(f"### Production predictions for {sel_site.replace('_',' ')}")
+                st.plotly_chart(make_site_plots(dfx, sel_site, phase), key="site"+phase)
+
+    with right_column:
+        st.plotly_chart(make_small_multiples(dfx, 'PV'), key="smpv"+phase)
+        st.plotly_chart(make_small_multiples(dfx, 'Wind'), key="smw"+phase)
+
 
 sel_site = None
 
-st.title("Acciona Phase II")
-st.markdown("This is a dashboard to explore the results of the Acciona Phase II project. The data is based on the results of the simulations of the different assets (PV and Wind) under different scenarios (SSP126, SSP245, SSP585)")
-st.empty()
+tab1, tab2 = st.tabs(["Phase I", "Phase II"])
 
-# Layout    
-left_column, right_column = st.columns(2)
-
-with left_column:
-    event = st.plotly_chart(make_map(),
-                    on_select="rerun", selection_mode=["points"])
-    points = event["selection"].get("points", [])
-    if points:
-        first_point = points[0]
-        sel_site = first_point.get("text", None)
-    else:
-        sel_site = None
-    st.empty()
-    #sel_site = st.selectbox("Select site",df.sitename.unique())
-    if sel_site is not None:
-        title_col, close_col = st.columns([0.9, 0.1])
-        if close_col.button("",icon=":material/close:"):
-            sel_site = None
-        else:
-            title_col.markdown(f"### Power and damage predictions for {sel_site.replace('_',' ')}")
-            st.plotly_chart(make_site_plots(sel_site))
-
-with right_column:
-    st.plotly_chart(make_small_multiples('PV'))
-    st.plotly_chart(make_small_multiples('Wind'))
-
+with tab1:
+    st.title("Acciona Phase I")
+    st.markdown("This is a dashboard to explore the results of the Acciona Phase I project. The data is based on the results of the simulations of the different assets (PV and Wind) under different scenarios (SSP126, SSP245, SSP585)")
+    make_page(dfp1, "phase1")
+with tab2:
+    st.title("Acciona Phase II")
+    st.markdown("This is a dashboard to explore the results of the Acciona Phase II project. The data is based on the results of the simulations of the different assets (PV and Wind) under different scenarios (SSP126, SSP245, SSP585)")
+    make_page(dfp2, "phase2")
 
